@@ -1,5 +1,5 @@
 // 離線用：App 本身嘅檔案。AI 模型由 segment.js 自己 cache。
-const VERSION = '25bea3c0';
+const VERSION = '641d8835';
 const SHELL = 'closet-shell-' + VERSION;
 const FILES = [
   './',

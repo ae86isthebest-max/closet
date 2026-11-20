@@ -2,6 +2,10 @@ import * as db from './db.js';
 import * as seg from './segment.js';
 import { classify, friendlyError, testKey, CATEGORIES, SEASONS, MODELS, DEFAULT_MODEL, NoKeyError } from './claude.js';
 import { openMaskEditor } from './editor.js';
+import { dominantColors } from './colors.js';
+
+// Claude 認衫預設關閉（唔使錢）；喺設定開
+const claudeOn = async () => (await db.kvGet('useClaude')) === true && !!(await db.kvGet('apiKey'));
 import { buildBackup, saveFile, importBackup } from './backup.js';
 
 // ---------------- 狀態 ----------------
@@ -121,7 +125,8 @@ function card(item) {
   const proc = item.status === 'processing' || item.status === 'classifying';
   const badge = item.status === 'processing' ? '<span class="badge">去背中…</span>'
     : item.status === 'classifying' ? '<span class="badge">認緊…</span>'
-    : item.status === 'error' ? '<span class="badge warn">要補資料</span>' : '';
+    : item.status === 'error' ? '<span class="badge warn">要補資料</span>'
+    : item.status === 'unsorted' ? '<span class="badge warn">揀類別</span>' : '';
   return `<button class="card ${proc ? 'processing' : ''}" data-id="${item.id}">
     ${item.thumb ? `<img src="${thumbUrl(item)}" alt="${esc(item.name)}" loading="lazy">` : ''}
     ${badge}${item.fav ? '<span class="fav">♥</span>' : ''}
@@ -203,7 +208,7 @@ function slots() {
 }
 
 function viewOutfit(main) {
-  const ready = state.items.filter((i) => i.status === 'ready' || i.status === 'error');
+  const ready = state.items.filter((i) => i.category && i.thumb);
   let html = header('配衫', '左右碌揀衫，正中間嗰件就係揀咗');
   html += `<div class="chips" style="padding-top:0">
       ${SEASONS.map((s) => `<button class="chip season ${state.filterSeason === s ? 'on' : ''}" data-season="${s}">${s}</button>`).join('')}
@@ -341,21 +346,22 @@ function closeSheet(ov) {
 async function openItem(id) {
   const item = await db.get('items', id);
   if (!item) return;
+  const useClaude = await claudeOn();
   const url = item.cutout ? URL.createObjectURL(item.cutout) : '';
   const cats = [...CATEGORIES];
   const ov = sheet(`
     <div class="hero">${url ? `<img src="${url}" alt="">` : '<div class="muted">處理緊…</div>'}</div>
-    ${item.status === 'error' ? `<p class="err">認唔到：${esc(item.error || '')}</p>` : ''}
+    ${item.status === 'error' && item.error ? `<p class="err">認唔到：${esc(item.error)}</p>` : ''}
     <div class="field"><label>名</label><input class="input" id="fName" value="${esc(item.name || '')}" placeholder="例如：米白色冷衫"></div>
-    <div class="field"><label>類別</label><div class="chips" id="fCat">${cats.map((c) => `<button class="chip ${item.category === c ? 'on' : ''}" data-v="${c}">${c}</button>`).join('')}</div></div>
+    <div class="field"><label ${item.category ? '' : 'style="color:var(--pink)"'}>${item.category ? '類別' : '類別（揀一個）'}</label><div class="chips" id="fCat">${cats.map((c) => `<button class="chip ${item.category === c ? 'on' : ''}" data-v="${c}">${c}</button>`).join('')}</div></div>
     <div class="field"><label>細分類</label><input class="input" id="fType" value="${esc(item.type || '')}" placeholder="例如：T恤、牛仔褲"></div>
-    <div class="field"><label>季節</label><div class="chips" id="fSeason">${SEASONS.map((s) => `<button class="chip season ${item.seasons?.includes(s) ? 'on' : ''}" data-v="${s}">${s}</button>`).join('')}</div></div>
+    <div class="field"><label>季節（唔揀 = 四季都啱）</label><div class="chips" id="fSeason">${SEASONS.map((s) => `<button class="chip season ${item.seasons?.includes(s) ? 'on' : ''}" data-v="${s}">${s}</button>`).join('')}</div></div>
     ${item.colors?.length ? `<div class="field"><label>顏色</label><div class="swatches">${item.colors.map((c) => `<span class="sw"><i style="background:${/^#[0-9a-f]{6}$/i.test(c.hex) ? c.hex : '#ccc'}"></i>${esc(c.name)}</span>`).join('')}</div></div>` : ''}
     <div class="field"><label>標籤（用逗號分開）</label><input class="input" id="fTags" value="${esc((item.tags || []).join('、'))}"></div>
     <div class="row" style="margin-top:6px">
       <button class="btn ghost" id="fFav">${item.fav ? '♥ 已最愛' : '♡ 最愛'}</button>
       <button class="btn ghost" id="fEdit">✏️ 修邊</button>
-      <button class="btn ghost" id="fAgain">✨ 再認</button>
+      ${useClaude ? '<button class="btn ghost" id="fAgain">✨ Claude 再認</button>' : ''}
     </div>
     <div class="row" style="margin-top:10px">
       <button class="btn danger" id="fDel">刪除</button>
@@ -381,13 +387,16 @@ async function openItem(id) {
     tags: $('#fTags', ov).value.split(/[,，、]/).map((s) => s.trim()).filter(Boolean),
     status: cat ? 'ready' : item.status,
   });
+  // 冇改名：用「顏色＋細分類／類別」自動改
+  const autoName = (it) => ({ ...it, name: it.name || `${it.colors?.[0]?.name || ''}${it.type || it.category || ''}` });
   $('#fFav', ov).addEventListener('click', (e) => {
     item.fav = !item.fav;
     e.target.textContent = item.fav ? '♥ 已最愛' : '♡ 最愛';
   });
   $('#fSave', ov).addEventListener('click', async () => {
     const latest = await db.get('items', id);
-    await db.put('items', { ...collect(), thumb: latest.thumb, cutout: latest.cutout, mask: latest.mask });
+    if (!cat) return toast('揀一個類別先');
+    await db.put('items', autoName({ ...collect(), thumb: latest.thumb, cutout: latest.cutout, mask: latest.mask, colors: latest.colors }));
     await reload();
     close();
     render();
@@ -410,13 +419,13 @@ async function openItem(id) {
     if (!edited) return;
     const updated = await saveCutout(item, src, edited);
     if (!updated) return toast('成件擦晒喎，冇儲存');
-    await db.put('items', { ...collect(), cutout: updated.cutout, thumb: updated.thumb, mask: updated.mask });
+    await db.put('items', { ...collect(), cutout: updated.cutout, thumb: updated.thumb, mask: updated.mask, colors: updated.colors });
     await reload();
     close();
     render();
     toast('修好咗 ✨');
   });
-  $('#fAgain', ov).addEventListener('click', async () => {
+  $('#fAgain', ov)?.addEventListener('click', async () => {
     await db.put('items', collect());
     close();
     classifyItem(id, true);
@@ -429,6 +438,7 @@ async function saveCutout(item, src, mask) {
   if (!cut) return null;
   const big = seg.scaled(cut, 1000);
   return {
+    colors: dominantColors(cut),
     cutout: await seg.canvasToBlob(big, 'image/png'),
     thumb: await seg.canvasToBlob(seg.scaled(cut, 360), 'image/png'),
     mask: await seg.canvasToBlob(seg.maskToCanvas(mask, src.width, src.height), 'image/png'),
@@ -496,10 +506,18 @@ async function processJob({ id, file }) {
   const out = await saveCutout({}, src, mask);
   const orig = await seg.canvasToBlob(src, 'image/jpeg', 0.88);
   const item = await db.get('items', id);
-  await db.put('items', { ...item, ...out, orig, status: 'classifying' });
-  await reload();
-  if (state.tab === 'closet') render();
-  classifyItem(id);
+  if (await claudeOn()) {
+    await db.put('items', { ...item, ...out, orig, status: 'classifying' });
+    await reload();
+    if (state.tab === 'closet') render();
+    classifyItem(id);
+  } else {
+    // 免費模式：顏色已經自動計好，類別由佢自己揀
+    await db.put('items', { ...item, ...out, orig, status: 'unsorted' });
+    await reload();
+    if (state.tab === 'closet') render();
+    if (!queue.length && !document.querySelector('.overlay, .editor')) openItem(id);
+  }
 }
 
 const classifying = new Set();
@@ -548,6 +566,7 @@ async function viewSettings(main) {
   const key = (await db.kvGet('apiKey')) || '';
   const model = (await db.kvGet('model')) || DEFAULT_MODEL;
   const segMode = (await db.kvGet('segMode')) || 'ai';
+  const useClaudeSetting = (await db.kvGet('useClaude')) === true;
   const last = await db.kvGet('lastBackup');
   let est = null, persisted = false;
   try { est = await navigator.storage?.estimate?.(); persisted = await navigator.storage?.persisted?.(); } catch (_) {}
@@ -555,8 +574,11 @@ async function viewSettings(main) {
   const modelCached = await seg.isModelCached();
   main.innerHTML = header('設定') + `
     <section class="panel">
-      <h3>🔑 Claude API key</h3>
-      <p class="muted">只會儲喺呢部手機，用嚟自動認衫。每件衫只送一張縮細咗、去咗背景嘅衫相俾 Claude，唔會送原相。</p>
+      <h3>🤖 Claude 自動認衫（選用，要錢）</h3>
+      <p class="muted">預設關咗，完全免費：影完相自動去背同計顏色，類別同季節自己揀。開咗就會用 Claude 自動認，要 API key，每件約 HK$0.005 至 0.1。</p>
+      <label class="row" style="align-items:center;margin:10px 0;font-weight:600"><span>用 Claude 自動認衫</span>
+        <input type="checkbox" id="useClaude" ${useClaudeSetting ? 'checked' : ''} style="flex:0 0 auto;width:24px;height:24px;accent-color:var(--pink)"></label>
+      <p class="muted">API key 只會儲喺呢部手機。每件衫只送一張縮細咗、去咗背景嘅衫相俾 Claude，唔會送原相。</p>
       <input class="input" id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-ant-…" value="${esc(key)}">
       <div class="row">
         <button class="btn primary" id="saveKey">儲存</button>
@@ -567,7 +589,7 @@ async function viewSettings(main) {
       <div class="field"><label>認衫模型</label>
         <select class="input" id="model">${MODELS.map((m) => `<option value="${m.id}" ${m.id === model ? 'selected' : ''}>${m.label}</option>`).join('')}</select>
       </div>
-      <button class="btn ghost block" id="retryAll">✨ 將「要補資料」嘅衫再認一次</button>
+      <button class="btn ghost block" id="retryAll">✨ 用 Claude 認晒未分類嘅衫</button>
     </section>
     <section class="panel">
       <h3>✂️ 去背方式</h3>
@@ -609,10 +631,15 @@ async function viewSettings(main) {
     try { await testKey(v); $('#keyMsg').textContent = '✅ 個 key 用得'; } catch (e) { $('#keyMsg').textContent = '❌ ' + friendlyError(e); }
   });
   $('#delKey')?.addEventListener('click', async () => { await db.kvDel('apiKey'); render(); });
+  $('#useClaude').addEventListener('change', async (e) => {
+    await db.kvSet('useClaude', e.target.checked);
+    if (e.target.checked && !(await db.kvGet('apiKey'))) toast('記得喺下面入 API key');
+  });
   $('#model').addEventListener('change', (e) => db.kvSet('model', e.target.value));
   $('#segMode').addEventListener('change', (e) => db.kvSet('segMode', e.target.value));
   $('#retryAll').addEventListener('click', async () => {
-    const bad = state.items.filter((i) => i.status === 'error');
+    if (!(await claudeOn())) return toast('要先開「用 Claude 自動認衫」同入 key');
+    const bad = state.items.filter((i) => i.status === 'error' || i.status === 'unsorted');
     if (!bad.length) return toast('冇要補資料嘅衫');
     toast(`再認緊 ${bad.length} 件…`);
     for (const i of bad) await classifyItem(i.id);
@@ -677,7 +704,10 @@ async function start() {
   // 上次未處理完（例如 App 被關咗）：去背中嘅冇原相就刪，認緊嘅就再認
   for (const i of state.items) {
     if (i.status === 'processing') await db.del('items', i.id);
-    else if (i.status === 'classifying') classifyItem(i.id);
+    else if (i.status === 'classifying') {
+      if (await claudeOn()) classifyItem(i.id);
+      else await db.put('items', { ...i, status: 'unsorted' });
+    }
   }
   await reload();
   render();

@@ -1,6 +1,6 @@
 # 我的衣櫃
 
-私人衣櫃網頁 App（加到 iPhone 主畫面用）。逐件衫影相 → 手機本機 AI 去背 → Claude 自動認類別／顏色／季節 → 入庫，可以左右碌配衫。
+私人衣櫃網頁 App（加到 iPhone 主畫面用）。逐件衫影相 → 手機本機 AI 去背 → 自動計顏色、自己揀類別（免費）→ 入庫，可以左右碌配衫。Claude 自動認衫係選用功能，喺設定開，要 API key。
 
 - 網址：https://ae86isthebest-max.github.io/closet/
 - 相片、API key 全部只儲喺手機（IndexedDB）。只有縮細咗、去咗背景嘅衫相會送去 Claude 認衫。
